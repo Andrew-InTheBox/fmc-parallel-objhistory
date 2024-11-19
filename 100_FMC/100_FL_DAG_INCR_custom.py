@@ -57,7 +57,7 @@ else:
 		mappings = json.load(file)
 
 INCR = DAG(
-    dag_id="INCR",
+    dag_id="INCR-CUSTOM",
     default_args=default_args,
     description="incr fmc test",
     schedule_interval="@hourly",
