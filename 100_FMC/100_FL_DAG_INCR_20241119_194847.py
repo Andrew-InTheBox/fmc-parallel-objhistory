@@ -24,28 +24,30 @@ from vs_fmc_plugin.operators.snowflake_operator import SnowflakeOperator
 
 
 default_args = {
-    "owner": "Vaultspeed",
-    "retries": 3,
-    "retry_delay": timedelta(seconds=10),
+	"owner":"Vaultspeed",
+	"retries": 3,
+	"retry_delay": timedelta(seconds=10),
 	"start_date":datetime.strptime("02-02-2020 23:00:00", "%d-%m-%Y %H:%M:%S")
 }
 
 path_to_mtd = Path(Variable.get("path_to_metadata"))
 
 def gen_set_failure(object_names):
-    def set_failure_task(context):
-        try:
-            for object_name in object_names:
-                SnowflakeOperator(
-                    task_id=f"""fmc_{src_object["src_object_name"]}_success""",
-                    snowflake_conn_id="SNOW_COL",
-                    sql=f"""CALL "ColruytFMC_PROC".""('{{{{ dag_run.id }}}}', '1');""",
-                    autocommit=False,
-                    dag=INCR
-                ).execute(context)
-        except Exception as e:
-            print(e)
-    return set_failure_task
+	# returns a functions which sets a load for the given procedures to failed
+	# This is needed because on_failure_callback function cannot accept extra arguments
+	def set_failure_task(context):
+		try:
+			for object_name in object_names:
+				SnowflakeOperator(
+					task_id=f"""fmc_{src_object["src_object_name"]}_success""", 
+					snowflake_conn_id="SNOW_COL", 
+					sql=f"""CALL "ColruytFMC_PROC".""('{{{{ dag_run.id }}}}', '1');""", 
+					autocommit=False, 
+					dag=INCR
+				).execute(context)
+		except Exception as e:
+			print(e)
+	return set_failure_task
 
 
 if (path_to_mtd / "100_mappings_INCR_20241119_194847.json").exists():
@@ -57,92 +59,47 @@ else:
 		mappings = json.load(file)
 
 INCR = DAG(
-    dag_id="INCR",
-    default_args=default_args,
-    description="incr fmc test",
-    schedule_interval="@hourly",
-    concurrency=4,
-    catchup=False,
-    max_active_runs=1,
-    tags=["VaultSpeed", "DTA", "DV"]
+	dag_id="INCR", 
+	default_args=default_args,
+	description="incr fmc test", 
+	schedule_interval="@hourly", 
+	concurrency=4, 
+	catchup=False, 
+	max_active_runs=1,
+	tags=["VaultSpeed", "DTA", "DV"]
 )
 
 source_objects = {frozenset(src_object.items()): src_object for mapping in mappings.values() for src_object in mapping["src_objects"]}.values()
 
 # Create incremental fmc tasks
+# insert load metadata
 fmc_mtd = SnowflakeOperator(
-    task_id="fmc_mtd_init",
-    snowflake_conn_id="SNOW_COL",
-    sql=f"""CALL "ColruytFMC_PROC"."SET_FMC_MTD_FL_INCR_DTA_INIT"('{{{{ dag_run.dag_id }}}}', '{{{{ dag_run.id }}}}', '{{{{ data_interval_end.strftime("%Y-%m-%d %H:%M:%S.%f") }}}}');""",
-    autocommit=False,
-    dag=INCR
+	task_id="fmc_mtd", 
+	snowflake_conn_id="SNOW_COL", 
+	sql=f"""CALL "ColruytFMC_PROC"."SET_FMC_MTD_FL_INCR_DTA"('{{{{ dag_run.dag_id }}}}', '{{{{ dag_run.id }}}}', '{{{{ data_interval_end.strftime(\"%Y-%m-%d %H:%M:%S.%f\") }}}}');""", 
+	autocommit=False, 
+	dag=INCR
 )
 
-# Add parallel tasks
-fmc_obj_hist_transactions = SnowflakeOperator(
-    task_id="fmc_obj_hist_transactions",
-    snowflake_conn_id="SNOW_COL",
-    sql=f"""CALL "ColruytFMC_PROC"."SET_FMC_MTD_FL_INCR_DTA_OBJ_HIST_TRANSACTIONS"('{{{{ dag_run.id }}}}');""",
-    autocommit=False,
-    dag=INCR
-)
-
-fmc_obj_hist_customers = SnowflakeOperator(
-    task_id="fmc_obj_hist_customers",
-    snowflake_conn_id="SNOW_COL",
-    sql=f"""CALL "ColruytFMC_PROC"."SET_FMC_MTD_FL_INCR_DTA_OBJ_HIST_CUSTOMERS"('{{{{ dag_run.id }}}}');""",
-    autocommit=False,
-    dag=INCR
-)
-
-fmc_obj_hist_products = SnowflakeOperator(
-    task_id="fmc_obj_hist_products",
-    snowflake_conn_id="SNOW_COL",
-    sql=f"""CALL "ColruytFMC_PROC"."SET_FMC_MTD_FL_INCR_DTA_OBJ_HIST_PRODUCTS"('{{{{ dag_run.id }}}}');""",
-    autocommit=False,
-    dag=INCR
-)
-
-fmc_final = SnowflakeOperator(
-    task_id="fmc_mtd_final",
-    snowflake_conn_id="SNOW_COL",
-    sql=f"""CALL "ColruytFMC_PROC"."SET_FMC_MTD_FL_INCR_DTA_FINAL"('{{{{ dag_run.id }}}}');""",
-    autocommit=False,
-    dag=INCR
-)
-
-# Set up the parallel execution flow
-for parallel_task in [fmc_obj_hist_transactions, fmc_obj_hist_customers, fmc_obj_hist_products]:
-    fmc_mtd >> parallel_task >> fmc_final
-
-# Update tasks dictionary with all tasks
-tasks = {
-    "fmc_mtd_init": fmc_mtd,
-    "fmc_mtd_final": fmc_final,
-    "fmc_obj_hist_transactions": fmc_obj_hist_transactions,
-    "fmc_obj_hist_customers": fmc_obj_hist_customers,
-    "fmc_obj_hist_products": fmc_obj_hist_products
-}
+tasks = {"fmc_mtd":fmc_mtd}
 
 # Create mapping tasks
 for map, info in mappings.items():
-    task = SnowflakeOperator(
-        task_id=map, 
-        snowflake_conn_id="SNOW_COL", 
-        sql=f"""CALL {info["map_schema"]}."{map}"();""", 
-        autocommit=False, 
-        on_failure_callback=gen_set_failure([src["src_object_name"] for src in info["src_objects"]]), 
-        dag=INCR
-    )
-    
-    # Update the dependency from 'fmc_mtd' to 'fmc_mtd_final'
-    info["dependencies"] = ["fmc_mtd_final" if dep == "fmc_mtd" else dep for dep in info["dependencies"]]
-    
-    for dep in info["dependencies"]:
-        task << tasks[dep]
-    
-    tasks[map] = task
+	task = SnowflakeOperator(
+		task_id=map, 
+		snowflake_conn_id="SNOW_COL", 
+		sql=f"""CALL {info["map_schema"]}."{map}"();""", 
+		autocommit=False, 
+		on_failure_callback=gen_set_failure([src["src_object_name"] for src in info["src_objects"]]), 
+		dag=INCR
+	)
 	
+	for dep in info["dependencies"]:
+		task << tasks[dep]
+	
+	tasks[map] = task
+	
+
 # task to indicate the end of a load
 end_task = DummyOperator(
 	task_id="end_of_load", 
