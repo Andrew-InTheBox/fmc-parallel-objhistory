@@ -1,0 +1,8 @@
+{
+	"HUB_CUSTOMERS" : {"dependencies": ["HUB_DTA_CUSTOMERS_INCR"], "schema": "DV_FL"},
+	"HUB_SALES_TRANSACTIONS" : {"dependencies": ["HUB_DTA_SALES_TRANSACTIONS_INCR"], "schema": "DV_FL"},
+	"SAT_DTA_SALES_TRANSACTIONS" : {"dependencies": ["SAT_DTA_SALESTRANSACTIONS_INCR"], "schema": "DV_FL"},
+	"SAT_DTA_CUSTOMERS" : {"dependencies": ["SAT_DTA_CUSTOMERS_INCR"], "schema": "DV_FL"},
+	"LNK_SALESTRANSACTIONS_CUSTOMERS" : {"dependencies": ["LNK_DTA_SALESTRANSACTIONS_CUSTOMERS_INCR"], "schema": "DV_FL"},
+	"LKS_DTA_SALESTRANSACTIONS_CUSTOMERS" : {"dependencies": ["LKS_DTA_SALESTRANSACTIONS_CUSTOMERS_INCR"], "schema": "DV_FL"}
+}
