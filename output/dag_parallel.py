@@ -71,6 +71,67 @@ INCR = DAG(
 
 source_objects = {frozenset(src_object.items()): src_object for mapping in mappings.values() for src_object in mapping["src_objects"]}.values()
 
+# Create FMC init task
+    fmc_mtd_init = SnowflakeOperator(
+        task_id="fmc_mtd_init",
+        snowflake_conn_id="SNOW_COL",
+        sql=f"""CALL "ColruytFMC_PROC"."SET_FMC_MTD_FL_INCR_DTA_INIT"('{{{{ dag_run.dag_id }}}}', '{{{{ dag_run.id }}}}', '{{{{ data_interval_end.strftime("%Y-%m-%d %H:%M:%S.%f") }}}}');""",
+        autocommit=False,
+        dag=INCR
+    )
+
+    # Create parallel object history tasks
+    parallel_tasks = []
+    fmc_obj_hist_customers = SnowflakeOperator(
+        task_id="fmc_obj_hist_customers",
+        snowflake_conn_id="SNOW_COL",
+        sql=f"""CALL "ColruytFMC_PROC"."SET_FMC_MTD_FL_INCR_DTA_OBJ_HIST_CUSTOMERS"('{{ dag_run.id }}');""",
+        autocommit=False,
+        dag=INCR
+    )
+    parallel_tasks.append(fmc_obj_hist_customers)
+    fmc_obj_hist_sales_transactions = SnowflakeOperator(
+        task_id="fmc_obj_hist_sales_transactions",
+        snowflake_conn_id="SNOW_COL",
+        sql=f"""CALL "ColruytFMC_PROC"."SET_FMC_MTD_FL_INCR_DTA_OBJ_HIST_SALES_TRANSACTIONS"('{{ dag_run.id }}');""",
+        autocommit=False,
+        dag=INCR
+    )
+    parallel_tasks.append(fmc_obj_hist_sales_transactions)
+    fmc_obj_hist_products = SnowflakeOperator(
+        task_id="fmc_obj_hist_products",
+        snowflake_conn_id="SNOW_COL",
+        sql=f"""CALL "ColruytFMC_PROC"."SET_FMC_MTD_FL_INCR_DTA_OBJ_HIST_PRODUCTS"('{{ dag_run.id }}');""",
+        autocommit=False,
+        dag=INCR
+    )
+    parallel_tasks.append(fmc_obj_hist_products)
+
+    # Create final task
+    fmc_final = SnowflakeOperator(
+        task_id="fmc_mtd_final",
+        snowflake_conn_id="SNOW_COL",
+        sql=f"""CALL "ColruytFMC_PROC"."SET_FMC_MTD_FL_INCR_DTA_FINAL"('{{{{ dag_run.id }}}}');""",
+        autocommit=False,
+        dag=INCR
+    )
+
+    # Set up dependencies
+    for task in parallel_tasks:
+        fmc_mtd_init >> task >> fmc_final
+
+    # Update tasks dictionary
+    tasks.update({
+        "fmc_mtd_init": fmc_mtd_init,
+        "fmc_mtd_final": fmc_final,
+        "fmc_obj_hist_customers": fmc_obj_hist_customers,
+        "fmc_obj_hist_sales_transactions": fmc_obj_hist_sales_transactions,
+        "fmc_obj_hist_products": fmc_obj_hist_products,
+})
+
+
+# PARALLEL_TASKS_PLACEHOLDER
+
 # Create incremental fmc tasks
 # insert load metadata
 fmc_mtd = SnowflakeOperator(

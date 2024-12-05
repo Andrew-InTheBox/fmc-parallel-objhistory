@@ -156,73 +156,102 @@ class ETLSplitter:
         
         return "Done.";
     $X$;'''.format(name, ', '.join(params), '\n    '.join(sections))
-
-    def _generate_task_dependencies(self) -> str:
-        """Generate the dependencies between tasks"""
-        dependencies = []
-        
-        # Initial task dependencies
-        for obj in self.objects:
-            task_name = f"fmc_obj_hist_{obj['name'].lower()}"
-            dependencies.append(f"init_task >> {task_name}")
-            dependencies.append(f"{task_name} >> final_task")
-            
-        return '\n'.join(dependencies)
     
     def generate_dag_code(self) -> str:
         """Generate updated DAG code with parallel execution"""
         dag_template = self._read_dag_template()
         
-        # Generate tasks section
-        tasks = []
-        
-        # Add init task
-        tasks.append('''
-init_task = SnowflakeOperator(
-    task_id="fmc_init",
-    snowflake_conn_id="SNOW_COL",
-    sql=f"""CALL "ColruytFMC_PROC"."SET_FMC_MTD_FL_INCR_DTA_INIT"('{{{{ dag_run.dag_id }}}}', '{{{{ dag_run.id }}}}', '{{{{ data_interval_end.strftime("%Y-%m-%d %H:%M:%S.%f") }}}}');""",
-    autocommit=False,
-    dag=dag)''')
+        # Generate parallel task structure
+        tasks_code = '''# Create FMC init task
+    fmc_mtd_init = SnowflakeOperator(
+        task_id="fmc_mtd_init",
+        snowflake_conn_id="SNOW_COL",
+        sql=f"""CALL "ColruytFMC_PROC"."SET_FMC_MTD_FL_INCR_DTA_INIT"('{{{{ dag_run.dag_id }}}}', '{{{{ dag_run.id }}}}', '{{{{ data_interval_end.strftime("%Y-%m-%d %H:%M:%S.%f") }}}}');""",
+        autocommit=False,
+        dag=INCR
+    )
 
-        # Add parallel object tasks
-        tasks.extend(self._generate_parallel_tasks())
+    # Create parallel object history tasks
+    parallel_tasks = []'''
+
+        # Add individual object tasks
+        for obj in self.objects:
+            tasks_code += f'''
+    fmc_obj_hist_{obj['name'].lower()} = SnowflakeOperator(
+        task_id="fmc_obj_hist_{obj['name'].lower()}",
+        snowflake_conn_id="SNOW_COL",
+        sql=f"""CALL "ColruytFMC_PROC"."SET_FMC_MTD_FL_INCR_DTA_OBJ_HIST_{obj['name'].upper()}"('{{{{ dag_run.id }}}}');""",
+        autocommit=False,
+        dag=INCR
+    )
+    parallel_tasks.append(fmc_obj_hist_{obj['name'].lower()})'''
+
+        # Add final task and dependencies
+        tasks_code += '''
+
+    # Create final task
+    fmc_final = SnowflakeOperator(
+        task_id="fmc_mtd_final",
+        snowflake_conn_id="SNOW_COL",
+        sql=f"""CALL "ColruytFMC_PROC"."SET_FMC_MTD_FL_INCR_DTA_FINAL"('{{{{ dag_run.id }}}}');""",
+        autocommit=False,
+        dag=INCR
+    )
+
+    # Set up dependencies
+    for task in parallel_tasks:
+        fmc_mtd_init >> task >> fmc_final
+
+    # Update tasks dictionary
+    tasks.update({
+        "fmc_mtd_init": fmc_mtd_init,
+        "fmc_mtd_final": fmc_final,'''
+
+        # Add object tasks to dictionary
+        for obj in self.objects:
+            tasks_code += f'''
+        "fmc_obj_hist_{obj['name'].lower()}": fmc_obj_hist_{obj['name'].lower()},'''
         
-        # Add final task
-        tasks.append('''
-final_task = SnowflakeOperator(
-    task_id="fmc_final",
-    snowflake_conn_id="SNOW_COL",
-    sql=f"""CALL "ColruytFMC_PROC"."SET_FMC_MTD_FL_INCR_DTA_FINAL"('{{{{ dag_run.id }}}}');""",
-    autocommit=False,
-    dag=dag)''')
+        tasks_code += '\n})'
+
+        # Replace placeholder in template
+        template_parts = dag_template.split("source_objects = ")
+        if len(template_parts) != 2:
+            raise ValueError("Could not find 'source_objects = ' in DAG template")
         
-        tasks_section = '\n'.join(tasks)
-        dependencies_section = self._generate_task_dependencies()
-        
-        return dag_template.replace(
-            "# PARALLEL_TASKS_PLACEHOLDER", tasks_section
-        ).replace(
-            "# DEPENDENCIES_PLACEHOLDER", dependencies_section
+        # Insert our code after the source_objects definition
+        remainder = template_parts[1].split("\n", 1)
+        if len(remainder) != 2:
+            raise ValueError("Invalid template format")
+            
+        return (
+            template_parts[0] + 
+            "source_objects = " + 
+            remainder[0] + 
+            "\n\n" + 
+            tasks_code + 
+            "\n\n" + 
+            remainder[1]
         )
 
     def _read_dag_template(self) -> str:
+        """Read and prepare the DAG template"""
         with open(self.dag_path, 'r') as f:
-            return f.read()
-
-    def _generate_parallel_tasks(self) -> List[str]:
-        """Generate the parallel task definitions"""
-        tasks = []
-        for obj in self.objects:
-            task_name = f"fmc_obj_hist_{obj['name'].lower()}"
-            tasks.append(f'''
-{task_name} = SnowflakeOperator(
-    task_id="{task_name}",
-    snowflake_conn_id="SNOW_COL",
-    sql=f"""CALL "ColruytFMC_PROC"."SET_FMC_MTD_FL_INCR_DTA_OBJ_HIST_{obj['name'].upper()}"('{{{{ dag_run.id }}}}');""",
-    autocommit=False,
-    dag=dag)''')
-        return tasks
+            template = f.read()
+            
+        # If template doesn't have our placeholder, we need to add it
+        if "# PARALLEL_TASKS_PLACEHOLDER" not in template:
+            # Find the position after source_objects definition
+            source_objects_pos = template.find("source_objects = ")
+            if source_objects_pos != -1:
+                insert_pos = template.find("\n", source_objects_pos) + 1
+                template = (
+                    template[:insert_pos] + 
+                    "\n# PARALLEL_TASKS_PLACEHOLDER\n" + 
+                    template[insert_pos:]
+                )
+        
+        return template
 
 def main():
     # Get the project root directory (one level up from src)
