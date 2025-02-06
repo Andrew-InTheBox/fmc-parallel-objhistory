@@ -52,12 +52,34 @@ class DagSplitter:
             raise FileNotFoundError(f"Configuration file not found: {config_path}")
 
     def validate_tasks(self):
+        """Validate that all tasks in config exist in mappings"""
         config_tasks = set(self.config_df['Task'].values)
         mapping_tasks = set(self.mappings.keys())
+        
+        # Debug logging
+        self.logger.info(f"Number of tasks in config: {len(config_tasks)}")
+        self.logger.info(f"Number of tasks in mappings: {len(mapping_tasks)}")
+        
+        # Sample of tasks from each
+        self.logger.info("Sample tasks from config:")
+        for task in list(config_tasks)[:5]:
+            self.logger.info(f"  {task}")
+        
+        self.logger.info("Sample tasks from mappings:")
+        for task in list(mapping_tasks)[:5]:
+            self.logger.info(f"  {task}")
         
         # Check for tasks in config that don't exist in mappings
         invalid_tasks = config_tasks - mapping_tasks
         if invalid_tasks:
+            # Try to identify any pattern in the differences
+            self.logger.info("Analyzing task name differences...")
+            if len(mapping_tasks) > 0:
+                sample_mapping = next(iter(mapping_tasks))
+                sample_config = next(iter(config_tasks))
+                self.logger.info(f"Sample mapping task: {sample_mapping}")
+                self.logger.info(f"Sample config task: {sample_config}")
+            
             raise ValueError(
                 f"Found {len(invalid_tasks)} tasks in config that don't exist in mappings:\n"
                 f"First 5 invalid tasks: {list(invalid_tasks)[:5]}"
@@ -144,27 +166,47 @@ class DagSplitter:
         self.temp_dir = tempfile.mkdtemp()
         
         with zipfile.ZipFile(self.input_zip_path, 'r') as zip_ref:
+            # List all files in zip for debugging
+            self.logger.info("Files in zip:")
+            for file in zip_ref.namelist():
+                self.logger.info(f"  {file}")
             zip_ref.extractall(self.temp_dir)
         
         # Find required files
-        dag_file = None
-        mappings_json = None
-        mtd_json = None
+        py_files = []
+        mapping_jsons = []
+        mtd_jsons = []
         
         for root, _, files in os.walk(self.temp_dir):
             for file in files:
                 file_path = Path(root) / file
                 if file.endswith('.py'):
-                    dag_file = file_path
-                elif file.endswith('mappings_RAW_BUSINESS_VAULT_INIT.json'):
-                    mappings_json = file_path
-                elif file.endswith('mtd_RAW_BUSINESS_VAULT_INIT.json'):
-                    mtd_json = file_path
+                    py_files.append(file_path)
+                elif file.endswith('.json'):
+                    if 'mappings' in file.lower():
+                        mapping_jsons.append(file_path)
+                    elif 'mtd' in file.lower():
+                        mtd_jsons.append(file_path)
         
-        if not all([dag_file, mappings_json, mtd_json]):
-            raise ValueError("Not all required files found in zip. Need: DAG (.py), mappings JSON, and MTD JSON")
-            
-        return dag_file, mappings_json, mtd_json
+        # Debug logging
+        self.logger.info(f"Found files:")
+        self.logger.info(f"Python files: {py_files}")
+        self.logger.info(f"Mapping JSONs: {mapping_jsons}")
+        self.logger.info(f"MTD JSONs: {mtd_jsons}")
+        
+        # Validate we found exactly one of each
+        errors = []
+        if len(py_files) != 1:
+            errors.append(f"Expected 1 Python file, found {len(py_files)}")
+        if len(mapping_jsons) != 1:
+            errors.append(f"Expected 1 mappings JSON file, found {len(mapping_jsons)}")
+        if len(mtd_jsons) != 1:
+            errors.append(f"Expected 1 MTD JSON file, found {len(mtd_jsons)}")
+        
+        if errors:
+            raise ValueError("\n".join(errors))
+                
+        return py_files[0], mapping_jsons[0], mtd_jsons[0]
 
     def __del__(self):
         """Cleanup temporary directory when object is destroyed"""
@@ -218,21 +260,30 @@ class DagSplitter:
         # Initialize groups with default
         self.task_groups = {'default': []}
         
-        # Extract all unique split targets from config
-        split_targets = sorted(self.config_df['FMC flow target'].unique())
+        # Extract all unique split targets from config, handling NaN values
+        split_targets = [
+            str(target) for target in self.config_df['FMC flow target'].unique()
+            if pd.notna(target) and target
+        ]
+        split_targets.sort()  # Sort string values
         
         # Group tasks based on FMC flow target
         for _, row in self.config_df.iterrows():
             task = row['Task']
-            target = row.get('FMC flow target', '').strip()
+            target = row.get('FMC flow target')
             
-            if not target:  # Empty target goes to default group
+            # Handle NaN, None, or empty target
+            if pd.isna(target) or not target:
                 self.task_groups['default'].append(task)
             else:
-                if target not in self.task_groups:
-                    self.task_groups[target] = []
-                self.task_groups[target].append(task)
-                
+                target = str(target).strip()
+                if not target:  # Empty string after stripping
+                    self.task_groups['default'].append(task)
+                else:
+                    if target not in self.task_groups:
+                        self.task_groups[target] = []
+                    self.task_groups[target].append(task)
+                    
         # Log group distribution
         self.logger.info(f"Created {len(self.task_groups)} task groups:")
         for group, tasks in self.task_groups.items():
@@ -317,7 +368,8 @@ class DagSplitter:
         # Sort groups to ensure consistent order
         # Default group should always be last
         sorted_groups = sorted(
-            [g for g in self.task_groups.keys() if g != 'default']
+            [str(g) for g in self.task_groups.keys() if g != 'default'],
+            key=str
         )
         if 'default' in self.task_groups:
             sorted_groups.append('default')
@@ -325,7 +377,7 @@ class DagSplitter:
         # Generate each split group in order
         for group_name in sorted_groups:
             group_tasks = self.task_groups[group_name]
-            safe_group_name = self._get_safe_group_name(group_name)
+            safe_group_name = self._get_safe_group_name(str(group_name))
             
             tasks_section += self._generate_split_group(
                 safe_group_name,
@@ -354,9 +406,15 @@ class DagSplitter:
         """
         Validate the split configuration
         """
+        # Get unique split values and filter out any non-string values
+        splits = [
+            str(split) for split in self.config_df['FMC flow target'].unique() 
+            if pd.notna(split) and split  # Filter out NaN/None/empty values
+        ]
+        
         # Check for valid split names
         invalid_splits = []
-        for split in self.config_df['FMC flow target'].unique():
+        for split in splits:
             if split and not (split.endswith('_SPLIT_001') or 
                             any(split.endswith(f'_SPLIT_{i:03d}') 
                                 for i in range(2, 1000))):
@@ -369,13 +427,17 @@ class DagSplitter:
             )
         
         # Check for sequential split numbers
-        split_numbers = sorted([
-            int(s.split('_SPLIT_')[1]) 
-            for s in self.config_df['FMC flow target'].unique() 
-            if s and '_SPLIT_' in s
-        ])
+        split_numbers = []
+        for s in splits:
+            if s and '_SPLIT_' in s:
+                try:
+                    num = int(s.split('_SPLIT_')[1])
+                    split_numbers.append(num)
+                except (ValueError, IndexError):
+                    continue
         
         if split_numbers:
+            split_numbers.sort()
             expected_sequence = list(range(1, len(split_numbers) + 1))
             if split_numbers != expected_sequence:
                 raise ValueError(
